@@ -1,8 +1,101 @@
-import { useRef, useState, useEffect } from 'react'
+import { useRef, useState, useEffect, useMemo } from 'react'
 import { useFrame, useThree } from '@react-three/fiber'
 import { useGLTF, useAnimations } from '@react-three/drei'
 import * as THREE from 'three'
 import { PLANET_RADIUS } from './Planet'
+
+function CartoonSmoke({ playerPosition, isMoving }: { playerPosition: React.MutableRefObject<THREE.Vector3>, isMoving: boolean }) {
+    const COUNT = 25;
+    const meshRef = useRef<THREE.InstancedMesh>(null);
+    const dummy = useMemo(() => new THREE.Object3D(), []);
+
+    // Store particle data
+    const particles = useRef([...Array(COUNT)].map(() => ({
+        active: false,
+        progress: 0,
+        position: new THREE.Vector3(),
+        velocity: new THREE.Vector3(),
+        scaleMod: Math.random() * 0.5 + 0.5,
+        speed: Math.random() * 0.5 + 1.0
+    })));
+
+    const spawnTimer = useRef(0);
+    const particleIndex = useRef(0);
+
+    useFrame((_, delta) => {
+        if (!meshRef.current) return;
+
+        // Spawning
+        spawnTimer.current += delta;
+        if (isMoving && spawnTimer.current > 0.01) {
+            spawnTimer.current = 0;
+            const p = particles.current[particleIndex.current];
+            p.active = true;
+            p.progress = 0;
+
+            // Spawn at player feet with jitter
+            const jitter = new THREE.Vector3(
+                (Math.random() - 0.5) * 2,
+                (Math.random() - 0.5) * 2,
+                (Math.random() - 0.5) * 2
+            ).normalize();
+
+            const up = playerPosition.current.clone().normalize();
+
+            p.position.copy(playerPosition.current).addScaledVector(jitter, 0.5).addScaledVector(up, 0.2);
+
+            // Safety initialization for React hot-reloading (since useRef persists old state)
+            if (!p.velocity) p.velocity = new THREE.Vector3();
+
+            // Give outward and upward velocity so they drift apart naturally instead of clustering
+            p.velocity.copy(jitter).multiplyScalar(1.5).addScaledVector(up, 1.0);
+
+            p.scaleMod = Math.random() * 0.5 + 0.5;
+            p.speed = Math.random() * 2.0 + 2.0;
+
+            particleIndex.current = (particleIndex.current + 1) % COUNT;
+        }
+
+        // Updating
+        particles.current.forEach((p, i) => {
+            if (p.active) {
+                p.progress += delta * p.speed;
+
+                if (p.progress >= 1) {
+                    p.active = false;
+                    dummy.scale.set(0, 0, 0);
+                    dummy.updateMatrix();
+                    meshRef.current!.setMatrixAt(i, dummy.matrix);
+                } else {
+                    if (p.velocity) {
+                        p.position.addScaledVector(p.velocity, delta);
+                        // Slow down velocity over time (air drag)
+                        p.velocity.multiplyScalar(0.95);
+                    }
+
+                    const scale = Math.sin(p.progress * Math.PI) * 0.4 * p.scaleMod;
+
+                    dummy.position.copy(p.position);
+                    dummy.scale.setScalar(scale);
+                    dummy.updateMatrix();
+                    meshRef.current!.setMatrixAt(i, dummy.matrix);
+                }
+            } else {
+                dummy.scale.set(0, 0, 0);
+                dummy.updateMatrix();
+                meshRef.current!.setMatrixAt(i, dummy.matrix);
+            }
+        });
+        meshRef.current.instanceMatrix.needsUpdate = true;
+    });
+
+    return (
+        <instancedMesh ref={meshRef} args={[undefined as any, undefined as any, COUNT]} frustumCulled={false}>
+            <sphereGeometry args={[1, 16, 16]} />
+            <meshToonMaterial color="#dddddd" transparent opacity={1} depthWrite={false} />
+        </instancedMesh>
+    );
+}
 
 export default function Player() {
     const group = useRef<THREE.Group>(null)
@@ -72,6 +165,8 @@ export default function Player() {
             // Fade in the new action
             if (targetAction) {
                 targetAction.reset().fadeIn(0.2).play();
+                // Speed up the animation slightly for a snappier feel
+                targetAction.setEffectiveTimeScale(1.3);
             }
 
             currentAction.current = targetActionName;
@@ -136,7 +231,7 @@ export default function Player() {
     useFrame((state, delta) => {
         if (!group.current) return;
 
-        const speed = 8;
+        const speed = 12;
         const isMoving = movement.forward !== 0 || movement.right !== 0;
 
         // 1. Calculate input direction relative to the camera
@@ -223,9 +318,12 @@ export default function Player() {
     })
 
     return (
-        <group ref={group}>
-            <primitive object={scene} scale={2} position={[0, 0, 0]} />
-        </group>
+        <>
+            <group ref={group}>
+                <primitive object={scene} scale={2} position={[0, 0, 0]} />
+            </group>
+            <CartoonSmoke playerPosition={playerPosition} isMoving={movement.forward !== 0 || movement.right !== 0} />
+        </>
     )
 }
 
