@@ -2,7 +2,8 @@ import { useRef, useState, useEffect, useMemo } from 'react'
 import { useFrame, useThree } from '@react-three/fiber'
 import { useGLTF, useAnimations } from '@react-three/drei'
 import * as THREE from 'three'
-import { PLANET_RADIUS } from './Planet'
+import { PLANET_RADIUS, TREES_DATA } from './Planet'
+import { useJoystickStore } from './store'
 
 function CartoonSmoke({ playerPosition, isMoving }: { playerPosition: React.MutableRefObject<THREE.Vector3>, isMoving: boolean }) {
     const COUNT = 25;
@@ -99,6 +100,7 @@ function CartoonSmoke({ playerPosition, isMoving }: { playerPosition: React.Muta
 
 export default function Player() {
     const group = useRef<THREE.Group>(null)
+    const lightGroupRef = useRef<THREE.Group>(null)
 
     // Load model and animations
     const { scene, animations } = useGLTF('/model/nasaka.glb')
@@ -106,6 +108,7 @@ export default function Player() {
 
     // Movement state
     const [movement, setMovement] = useState({ forward: 0, right: 0 })
+    const { forward: jF, right: jR } = useJoystickStore()
 
     // Track player position on sphere
     const playerPosition = useRef(new THREE.Vector3(0, PLANET_RADIUS, 0))
@@ -142,7 +145,7 @@ export default function Player() {
     const currentAction = useRef<string | null>(null)
 
     useEffect(() => {
-        const isRunning = movement.forward !== 0 || movement.right !== 0;
+        const isRunning = movement.forward !== 0 || movement.right !== 0 || jF !== 0 || jR !== 0;
 
         // Attempt to play animations based on what's available
         let runningAction = actions['running'] || actions['Run'] || actions['run'] || actions[Object.keys(actions).find(k => k.toLowerCase().includes('run')) || '']
@@ -171,7 +174,7 @@ export default function Player() {
 
             currentAction.current = targetActionName;
         }
-    }, [movement, actions])
+    }, [movement, jF, jR, actions])
 
     // Enhance material with shadows and custom Animal Crossing toon shader
     useEffect(() => {
@@ -201,11 +204,12 @@ export default function Player() {
             if (child.material) {
                 const oldMat = child.material as THREE.MeshStandardMaterial;
 
-                // Maximize texture sharpness
+                // Prevent WebGL texture atlas bleeding (red background leaking into UV seams)
                 if (oldMat.map) {
-                    oldMat.map.anisotropy = 16;
-                    oldMat.map.minFilter = THREE.LinearMipmapLinearFilter;
-                    oldMat.map.magFilter = THREE.LinearFilter;
+                    oldMat.map.generateMipmaps = false;
+                    oldMat.map.minFilter = THREE.NearestFilter; // Point filtering entirely stops sub-pixel bleeding
+                    oldMat.map.magFilter = THREE.NearestFilter; // Point filtering entirely stops sub-pixel bleeding
+                    oldMat.map.anisotropy = 1; // Disable anisotropic filtering to prevent wider sampling footprints
                     oldMat.map.needsUpdate = true;
                 }
 
@@ -232,7 +236,13 @@ export default function Player() {
         if (!group.current) return;
 
         const speed = 12;
-        const isMoving = movement.forward !== 0 || movement.right !== 0;
+
+        // Combine Keyboard and Joystick inputs
+        const joystick = useJoystickStore.getState();
+        const combinedForward = movement.forward + joystick.forward;
+        const combinedRight = movement.right + joystick.right;
+
+        const isMoving = combinedForward !== 0 || combinedRight !== 0;
 
         // 1. Calculate input direction relative to the camera
         // Camera's forward vector projected onto the tangent plane of the sphere at player's position
@@ -242,8 +252,8 @@ export default function Player() {
         const camRight = new THREE.Vector3().crossVectors(camForward, surfaceNormal).normalize();
 
         const inputDir = new THREE.Vector3()
-            .addScaledVector(camForward, movement.forward)
-            .addScaledVector(camRight, movement.right);
+            .addScaledVector(camForward, combinedForward)
+            .addScaledVector(camRight, combinedRight);
 
         if (inputDir.lengthSq() > 0) {
             inputDir.normalize();
@@ -251,8 +261,27 @@ export default function Player() {
 
         // 2. Move player position along the sphere
         if (isMoving) {
-            playerPosition.current.addScaledVector(inputDir, speed * delta);
-            playerPosition.current.normalize().multiplyScalar(PLANET_RADIUS);
+            const nextPos = playerPosition.current.clone().addScaledVector(inputDir, speed * delta);
+            nextPos.normalize().multiplyScalar(PLANET_RADIUS);
+
+            // Simple collision check against trees
+            for (let i = 0; i < TREES_DATA.length; i++) {
+                const tree = TREES_DATA[i];
+                const distSq = nextPos.distanceToSquared(tree.position);
+
+                // Approximate tree trunk collision radius proportional to scale
+                const colRadius = tree.scale * 0.8;
+
+                if (distSq < colRadius * colRadius) {
+                    // Slide away from tree center along the sphere surface
+                    const slideDir = nextPos.clone().sub(tree.position).normalize();
+                    nextPos.addScaledVector(slideDir, speed * delta);
+                    nextPos.normalize().multiplyScalar(PLANET_RADIUS);
+                    break; // Resolve only the closest one to prevent jitter
+                }
+            }
+
+            playerPosition.current.copy(nextPos);
 
             // New up vector after moving
             const newUp = playerPosition.current.clone().normalize();
@@ -315,14 +344,42 @@ export default function Player() {
         const tempMatrix = new THREE.Matrix4().lookAt(camera.position, lookTarget, pUp);
         const targetCamQuat = new THREE.Quaternion().setFromRotationMatrix(tempMatrix);
         camera.quaternion.slerp(targetCamQuat, 5 * delta);
+
+        // 4. Update dynamic sun light for shadows
+        if (lightGroupRef.current) {
+            lightGroupRef.current.position.copy(playerPosition.current);
+            // Align local Y axis to the surface normal, so the light always shines down
+            lightGroupRef.current.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), pUp);
+        }
     })
 
     return (
         <>
+            {/* Dynamic Sun Light that follows the player on the sphere */}
+            <group ref={lightGroupRef}>
+                <directionalLight
+                    position={[30, 40, 20]}
+                    intensity={2.5}
+                    castShadow
+                    shadow-mapSize={[1024, 1024]}
+                    shadow-camera-left={-40}
+                    shadow-camera-right={40}
+                    shadow-camera-top={40}
+                    shadow-camera-bottom={-40}
+                    shadow-camera-near={0.1}
+                    shadow-camera-far={100}
+                    shadow-bias={-0.001}
+                />
+            </group>
+
             <group ref={group}>
                 <primitive object={scene} scale={2} position={[0, 0, 0]} />
             </group>
-            <CartoonSmoke playerPosition={playerPosition} isMoving={movement.forward !== 0 || movement.right !== 0} />
+
+            <CartoonSmoke
+                playerPosition={playerPosition}
+                isMoving={movement.forward !== 0 || movement.right !== 0 || useJoystickStore.getState().forward !== 0 || useJoystickStore.getState().right !== 0}
+            />
         </>
     )
 }

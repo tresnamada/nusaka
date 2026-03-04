@@ -11,19 +11,19 @@ export default function GameScene() {
             {/* Lights */}
             <ambientLight intensity={1.5} />
             <hemisphereLight args={["#b1e1ff", "#8BC34A", 1]} />
-            <directionalLight
-                position={[20, 30, 20]}
-                intensity={2.5}
-                castShadow
-                shadow-mapSize={[2048, 2048]}
-                shadow-camera-left={-30}
-                shadow-camera-right={30}
-                shadow-camera-top={30}
-                shadow-camera-bottom={-30}
-            />
+
 
             {/* Environment */}
-            <Sky distance={450000} sunPosition={[20, 30, 20]} inclination={0} azimuth={0.25} />
+            <Sky
+                distance={450000}
+                sunPosition={[0, 10, -5]} // High noon
+                inclination={0}
+                azimuth={0.25}
+                mieCoefficient={0.001} // Extremely low mie to remove white horizon haze
+                mieDirectionalG={0.7}
+                rayleigh={0.1} // Lower rayleigh removes atmospheric thickness
+                turbidity={0.5} // Less hazy
+            />
 
             {/* World */}
             <Planet />
