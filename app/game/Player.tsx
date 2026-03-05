@@ -1,9 +1,118 @@
-import { useRef, useState, useEffect, useMemo } from 'react'
+import { useRef, useState, useEffect, useMemo, useLayoutEffect } from 'react'
 import { useFrame, useThree } from '@react-three/fiber'
-import { useGLTF, useAnimations } from '@react-three/drei'
+import { useGLTF, useAnimations, Hud, OrthographicCamera } from '@react-three/drei'
 import * as THREE from 'three'
 import { PLANET_RADIUS, TREES_DATA, KOMODO_DATA, ORANGUTAN_DATA, RAJAWALI_DATA } from './Planet'
 import { useJoystickStore } from './store'
+
+function MinimapGlobe({ playerPosition }: { playerPosition: React.MutableRefObject<THREE.Vector3> }) {
+    const globeRef = useRef<THREE.Mesh>(null)
+    const blipRef = useRef<THREE.Mesh>(null)
+
+    // Instanced mesh refs for performance
+    const treeMeshRef = useRef<THREE.InstancedMesh>(null);
+    const animalMeshRef = useRef<THREE.InstancedMesh>(null);
+    const { camera } = useThree();
+
+    // Compute instanced positions exactly once
+    useLayoutEffect(() => {
+        const dummy = new THREE.Object3D();
+
+        if (treeMeshRef.current) {
+            const visibleTrees = TREES_DATA.filter((_, i) => i % 5 === 0);
+            visibleTrees.forEach((tree, i) => {
+                dummy.position.copy(tree.position.clone().normalize());
+                dummy.updateMatrix();
+                treeMeshRef.current!.setMatrixAt(i, dummy.matrix);
+            });
+            treeMeshRef.current.instanceMatrix.needsUpdate = true;
+        }
+
+        if (animalMeshRef.current) {
+            const animals = [...KOMODO_DATA, ...ORANGUTAN_DATA, ...RAJAWALI_DATA];
+            animals.forEach((animal, i) => {
+                dummy.position.copy(animal.position.clone().normalize());
+                dummy.updateMatrix();
+                animalMeshRef.current!.setMatrixAt(i, dummy.matrix);
+            });
+            animalMeshRef.current.instanceMatrix.needsUpdate = true;
+        }
+    }, [])
+
+    useFrame(() => {
+        if (!globeRef.current || !blipRef.current) return;
+
+        // The globe itself rotates to always show the player at the center closest to the camera (+Z)
+        // The globe rotating logic needs to be rock-solid to avoid spinning at poles
+        const playerDir = playerPosition.current.clone().normalize();
+
+        // 1. Get the direction the camera is looking, projected FLAT onto the planet's surface at the player's position
+        let camForward = new THREE.Vector3(0, 0, -1).applyQuaternion(camera.quaternion);
+        camForward.projectOnPlane(playerDir).normalize();
+
+        // Handle pole singularity just in case
+        if (camForward.lengthSq() < 0.001) camForward.set(1, 0, 0);
+
+        // 2. Calculate the perpendicular 'right' vector on the planet's surface
+        const camRight = new THREE.Vector3().crossVectors(camForward, playerDir).normalize();
+
+        // 3. Construct a rotation matrix that represents the globe mapping perfectly into the UI space
+        // In the UI space: 
+        // +X (Right on screen) = camRight
+        // +Y (Up on screen)    = camForward (because camera forward goes UP on the 2D map)
+        // +Z (Towards user)    = playerDir (because we look top-down down the player's normal)
+        const m = new THREE.Matrix4().makeBasis(camRight, camForward, playerDir);
+
+        // We invert it, because we are rotating the GLOBE in the opposite direction 
+        // to keep the player stationary at the top-down +Z center
+        globeRef.current.quaternion.setFromRotationMatrix(m).invert();
+
+        // Player pin always hovers exactly in the center of the minimap
+        blipRef.current.position.set(0, 0, 1.15);
+        // Point the cone forwards
+        blipRef.current.rotation.set(-Math.PI / 2, 0, 0);
+    })
+
+    return (
+        <Hud>
+            <OrthographicCamera makeDefault position={[0, 0, 5]} zoom={50} />
+            <ambientLight intensity={1} />
+            <directionalLight position={[2, 5, 2]} intensity={2} />
+
+            <group position={[-window.innerWidth / 100 + 1.5, window.innerHeight / 100 - 1.5, 0]}>
+                {/* Background Globe representing the planet */}
+                <mesh ref={globeRef}>
+                    <sphereGeometry args={[1, 32, 32]} />
+                    <meshStandardMaterial color="#8BC34A" />
+
+                    {/* Simplified Trees as instanced dots on the globe */}
+                    <instancedMesh ref={treeMeshRef} args={[undefined as any, undefined as any, Math.ceil(TREES_DATA.length / 5)]}>
+                        <boxGeometry args={[0.05, 0.05, 0.05]} />
+                        <meshBasicMaterial color="#2d6a4f" />
+                    </instancedMesh>
+
+                    {/* Simplified Animals as instanced dots on the globe */}
+                    <instancedMesh ref={animalMeshRef} args={[undefined as any, undefined as any, KOMODO_DATA.length + ORANGUTAN_DATA.length + RAJAWALI_DATA.length]}>
+                        <boxGeometry args={[0.08, 0.08, 0.08]} />
+                        <meshBasicMaterial color="#FF5722" />
+                    </instancedMesh>
+                </mesh>
+
+                {/* Player Blip (static at center, pointing UP representing forward) */}
+                <mesh ref={blipRef}>
+                    <coneGeometry args={[0.08, 0.25, 16]} />
+                    <meshBasicMaterial color="#FFEB3B" />
+                </mesh>
+
+                {/* Outline ring */}
+                <mesh>
+                    <ringGeometry args={[1.1, 1.15, 64]} />
+                    <meshBasicMaterial color="rgba(255,255,255,0.5)" transparent />
+                </mesh>
+            </group>
+        </Hud>
+    )
+}
 
 function CartoonSmoke({ playerPosition, isMoving }: { playerPosition: React.MutableRefObject<THREE.Vector3>, isMoving: boolean }) {
     const COUNT = 25;
@@ -108,7 +217,7 @@ export default function Player() {
 
     // Movement state
     const [movement, setMovement] = useState({ forward: 0, right: 0 })
-    const { forward: jF, right: jR } = useJoystickStore()
+    const { forward: jF, right: jR, menuState } = useJoystickStore()
 
     // Track player position on sphere
     const playerPosition = useRef(new THREE.Vector3(0, PLANET_RADIUS, 0))
@@ -120,6 +229,7 @@ export default function Player() {
     // Handle keyboard
     useEffect(() => {
         const handleKeyDown = (e: KeyboardEvent) => {
+            if (menuState !== 'playing') return;
             switch (e.code) {
                 case 'KeyW': case 'ArrowUp': setMovement(m => ({ ...m, forward: 1 })); break;
                 case 'KeyS': case 'ArrowDown': setMovement(m => ({ ...m, forward: -1 })); break;
@@ -141,13 +251,13 @@ export default function Player() {
             window.removeEventListener('keydown', handleKeyDown)
             window.removeEventListener('keyup', handleKeyUp)
         }
-    }, [])
+    }, [menuState])
 
     // Animation logic
     const currentAction = useRef<string | null>(null)
 
     useEffect(() => {
-        const isRunning = movement.forward !== 0 || movement.right !== 0 || jF !== 0 || jR !== 0;
+        const isRunning = (movement.forward !== 0 || movement.right !== 0 || jF !== 0 || jR !== 0) && menuState === 'playing';
 
         // Attempt to play animations based on what's available
         let runningAction = actions['running'] || actions['Run'] || actions['run'] || actions[Object.keys(actions).find(k => k.toLowerCase().includes('run')) || '']
@@ -176,7 +286,7 @@ export default function Player() {
 
             currentAction.current = targetActionName;
         }
-    }, [movement, jF, jR, actions])
+    }, [movement, jF, jR, actions, menuState])
 
     // Enhance material with shadows and custom Animal Crossing toon shader
     useEffect(() => {
@@ -237,6 +347,7 @@ export default function Player() {
     useFrame((state, delta) => {
         if (!group.current) return;
 
+        const { menuState } = useJoystickStore.getState();
         const speed = 12;
 
         // Combine Keyboard and Joystick inputs
@@ -262,7 +373,7 @@ export default function Player() {
         }
 
         // 2. Move player position along the sphere
-        if (isMoving) {
+        if (isMoving && menuState === 'playing') {
             const nextPos = playerPosition.current.clone().addScaledVector(inputDir, speed * delta);
             nextPos.normalize().multiplyScalar(PLANET_RADIUS);
 
@@ -322,9 +433,11 @@ export default function Player() {
         group.current.quaternion.slerp(targetRotation.current, 15 * delta);
 
         // 3. Update camera position to follow player (Animal Crossing style)
+        const IsCreating = menuState === 'create_character';
+
         // Camera stays at a fixed orientation relative to the world, just moving along the sphere surface
-        const offsetDistance = 15; // Pulled further back for AC look
-        const offsetHeight = 10;    // Pulled significantly higher up for AC top-down angle
+        const offsetDistance = IsCreating ? 6 : 15; // Pulled closer for character creation
+        const offsetHeight = IsCreating ? 1.5 : 10;   // Lower angle for character creation
 
         const pUp = playerPosition.current.clone().normalize();
 
@@ -337,7 +450,7 @@ export default function Player() {
         }
 
         // Only rotate the camera slightly when moving to follow behind the player organically
-        if (isMoving) {
+        if (isMoving && !IsCreating) {
             currentCamForward.lerp(inputDir, 1 * delta).normalize();
         }
 
@@ -350,9 +463,10 @@ export default function Player() {
         camera.position.lerp(idealCameraPos, 5 * delta);
 
         // Camera smoothly looks at the player (slightly above)
+        // Adjust look target so player is centered in character creation
         const lookTarget = playerPosition.current.clone()
-            .addScaledVector(pUp, 1)          // Look lower down towards the feet
-            .addScaledVector(currentCamForward, 4);    // Look further ahead so the player is lower in the screen frame
+            .addScaledVector(pUp, IsCreating ? 1.5 : 1)
+            .addScaledVector(currentCamForward, IsCreating ? 0 : 4);
 
         const tempMatrix = new THREE.Matrix4().lookAt(camera.position, lookTarget, pUp);
         const targetCamQuat = new THREE.Quaternion().setFromRotationMatrix(tempMatrix);
@@ -391,8 +505,10 @@ export default function Player() {
 
             <CartoonSmoke
                 playerPosition={playerPosition}
-                isMoving={movement.forward !== 0 || movement.right !== 0 || useJoystickStore.getState().forward !== 0 || useJoystickStore.getState().right !== 0}
+                isMoving={menuState === 'playing' && (movement.forward !== 0 || movement.right !== 0 || useJoystickStore.getState().forward !== 0 || useJoystickStore.getState().right !== 0)}
             />
+
+            {menuState === 'playing' && <MinimapGlobe playerPosition={playerPosition} />}
         </>
     )
 }
