@@ -2,7 +2,7 @@ import { useRef, useState, useEffect, useMemo } from 'react'
 import { useFrame, useThree } from '@react-three/fiber'
 import { useGLTF, useAnimations } from '@react-three/drei'
 import * as THREE from 'three'
-import { PLANET_RADIUS, TREES_DATA } from './Planet'
+import { PLANET_RADIUS, TREES_DATA, KOMODO_DATA, ORANGUTAN_DATA, RAJAWALI_DATA } from './Planet'
 import { useJoystickStore } from './store'
 
 function CartoonSmoke({ playerPosition, isMoving }: { playerPosition: React.MutableRefObject<THREE.Vector3>, isMoving: boolean }) {
@@ -112,6 +112,8 @@ export default function Player() {
 
     // Track player position on sphere
     const playerPosition = useRef(new THREE.Vector3(0, PLANET_RADIUS, 0))
+    // Track continuous camera direction to prevent gimbal lock / sudden flips at poles
+    const cameraForward = useRef(new THREE.Vector3(0, 0, -1))
     // Target rotation for smooth turning
     const targetRotation = useRef(new THREE.Quaternion())
 
@@ -264,20 +266,26 @@ export default function Player() {
             const nextPos = playerPosition.current.clone().addScaledVector(inputDir, speed * delta);
             nextPos.normalize().multiplyScalar(PLANET_RADIUS);
 
-            // Simple collision check against trees
-            for (let i = 0; i < TREES_DATA.length; i++) {
-                const tree = TREES_DATA[i];
-                const distSq = nextPos.distanceToSquared(tree.position);
+            // Check collisions against a unified list of solid objects
+            const colliders = [
+                ...TREES_DATA.map(t => ({ pos: t.position, radius: t.scale * 0.8 })),
+                ...KOMODO_DATA.map(k => ({ pos: k.position, radius: 2.5 })), // Reduced Komodo
+                ...ORANGUTAN_DATA.map(o => ({ pos: o.position, radius: 2.5 })), // Reduced OrangUtan
+                ...RAJAWALI_DATA.map(r => ({ pos: r.position, radius: 1.5 })) // Reduced Rajawali heavily
+            ];
 
-                // Approximate tree trunk collision radius proportional to scale
-                const colRadius = tree.scale * 0.8;
+            for (let i = 0; i < colliders.length; i++) {
+                const col = colliders[i];
+                // Ignore height diffs for simple sphere pushing
+                const p1 = nextPos.clone().normalize();
+                const p2 = col.pos.clone().normalize();
+                const distSq = p1.distanceToSquared(p2) * PLANET_RADIUS * PLANET_RADIUS;
 
-                if (distSq < colRadius * colRadius) {
-                    // Slide away from tree center along the sphere surface
-                    const slideDir = nextPos.clone().sub(tree.position).normalize();
+                if (distSq < col.radius * col.radius) {
+                    const slideDir = nextPos.clone().sub(col.pos).normalize();
                     nextPos.addScaledVector(slideDir, speed * delta);
                     nextPos.normalize().multiplyScalar(PLANET_RADIUS);
-                    break; // Resolve only the closest one to prevent jitter
+                    break;
                 }
             }
 
@@ -315,31 +323,36 @@ export default function Player() {
 
         // 3. Update camera position to follow player (Animal Crossing style)
         // Camera stays at a fixed orientation relative to the world, just moving along the sphere surface
-        const offsetDistance = 15; // Decreased for a closer view
-        const offsetHeight = 8;    // Lowered for a closer view
+        const offsetDistance = 15; // Pulled further back for AC look
+        const offsetHeight = 10;    // Pulled significantly higher up for AC top-down angle
 
         const pUp = playerPosition.current.clone().normalize();
 
-        // Fix camera rotation to always look from "South" to "North" across the sphere
-        // Calculate a "North" direction tangent to the surface at the player's position
-        const globalNorth = new THREE.Vector3(0, 0, -1);
-        const pForward = globalNorth.clone().projectOnPlane(pUp).normalize();
+        // Smooth camera rotation using parallel transport to avoid 180-degree flips at the poles
+        let currentCamForward = cameraForward.current.clone().projectOnPlane(pUp).normalize();
 
-        // If we are exactly at the poles, pForward might be zero. Handle that edge case:
-        if (pForward.lengthSq() < 0.001) {
-            pForward.set(1, 0, 0);
+        // Edge case fallback
+        if (currentCamForward.lengthSq() < 0.001) {
+            currentCamForward = new THREE.Vector3(1, 0, 0).projectOnPlane(pUp).normalize();
         }
 
+        // Only rotate the camera slightly when moving to follow behind the player organically
+        if (isMoving) {
+            currentCamForward.lerp(inputDir, 1 * delta).normalize();
+        }
+
+        cameraForward.current.copy(currentCamForward);
+
         const idealCameraPos = playerPosition.current.clone()
-            .addScaledVector(pForward, -offsetDistance) // Move behind the player (South)
+            .addScaledVector(currentCamForward, -offsetDistance) // Move behind the player (South)
             .addScaledVector(pUp, offsetHeight);        // Move up away from the surface
 
         camera.position.lerp(idealCameraPos, 5 * delta);
 
         // Camera smoothly looks at the player (slightly above)
         const lookTarget = playerPosition.current.clone()
-            .addScaledVector(pUp, 3)          // Look a bit above the feet
-            .addScaledVector(pForward, 2);    // Look slightly ahead
+            .addScaledVector(pUp, 1)          // Look lower down towards the feet
+            .addScaledVector(currentCamForward, 4);    // Look further ahead so the player is lower in the screen frame
 
         const tempMatrix = new THREE.Matrix4().lookAt(camera.position, lookTarget, pUp);
         const targetCamQuat = new THREE.Quaternion().setFromRotationMatrix(tempMatrix);

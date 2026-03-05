@@ -2,6 +2,7 @@ import { useRef, useMemo } from 'react'
 import * as THREE from 'three'
 import { useFrame, useThree } from '@react-three/fiber'
 import { useGLTF } from '@react-three/drei'
+import { Animal } from './Animal'
 
 export const PLANET_RADIUS = 150;
 
@@ -43,6 +44,49 @@ export const TREES_DATA = Array.from({ length: TREE_COUNT }).map(() => {
     // Clear a safe radius of 80 units around the spawn to keep both player and camera clear
     return distanceToSpawn > 80;
 });
+
+function generateAnimalData(count: number, seedStart: number) {
+    const rng = seededRandom(seedStart);
+    return Array.from({ length: count }).map(() => {
+        const u = rng();
+        const v = rng();
+        const theta = 2 * Math.PI * u;
+        const phi = Math.acos(2 * v - 1);
+
+        const x = PLANET_RADIUS * Math.sin(phi) * Math.cos(theta);
+        const y = PLANET_RADIUS * Math.sin(phi) * Math.sin(theta);
+        const z = PLANET_RADIUS * Math.cos(phi);
+
+        const position = new THREE.Vector3(x, y, z);
+        const normal = position.clone().normalize();
+        // Animals stay on the ground
+        position.addScaledVector(normal, 0);
+
+        const scale = 1.0 + rng() * 0.5;
+        const rotationY = rng() * Math.PI * 2;
+
+        return { position, normal, scale, rotationY };
+    }).filter(animal => {
+        // Clear a safe radius around the player's spawn point
+        const spawnPoint = new THREE.Vector3(0, PLANET_RADIUS, 0);
+        if (animal.position.distanceToSquared(spawnPoint) < 80 * 80) return false;
+
+        // Ensure animals don't spawn inside trees
+        for (let i = 0; i < TREES_DATA.length; i++) {
+            const tree = TREES_DATA[i];
+            const safeDist = tree.scale * 1.5 + animal.scale * 3.0; // Rough approximation of collision radii
+            if (animal.position.distanceToSquared(tree.position) < safeDist * safeDist) {
+                return false;
+            }
+        }
+
+        return true;
+    });
+}
+
+export const KOMODO_DATA = generateAnimalData(15, 8812);
+export const ORANGUTAN_DATA = generateAnimalData(15, 9923);
+export const RAJAWALI_DATA = generateAnimalData(15, 1134);
 
 function Trees() {
     const { nodes, materials } = useGLTF('/model/pohon.glb') as any;
@@ -181,8 +225,20 @@ export default function Planet() {
                 )}
             </mesh>
             <Trees />
+            {KOMODO_DATA.map((data, i) => (
+                <Animal key={`komodo-${i}`} path="/model/Komodo.glb" position={data.position.clone().addScaledVector(data.normal, 0)} normal={data.normal} rotationY={data.rotationY} scale={data.scale * 0.3} />
+            ))}
+            {ORANGUTAN_DATA.map((data, i) => (
+                <Animal key={`orangutan-${i}`} path="/model/OrangUtan.glb" position={data.position.clone().addScaledVector(data.normal, 0)} normal={data.normal} rotationY={data.rotationY} scale={data.scale * 0.6} />
+            ))}
+            {RAJAWALI_DATA.map((data, i) => (
+                <Animal key={`rajawali-${i}`} path="/model/rajawali.glb" position={data.position.clone().addScaledVector(data.normal, 3)} normal={data.normal} rotationY={data.rotationY} scale={data.scale * 0.6} />
+            ))}
         </group>
     )
 }
 
 useGLTF.preload('/model/pohon.glb');
+useGLTF.preload('/model/Komodo.glb');
+useGLTF.preload('/model/OrangUtan.glb');
+useGLTF.preload('/model/rajawali.glb');
